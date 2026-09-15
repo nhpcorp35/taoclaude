@@ -13,6 +13,8 @@
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
 import { ApiPromise, WsProvider } from '@polkadot/api';
 
 const app = express();
@@ -163,11 +165,125 @@ async function taoSummary(coldkey) {
 
 app.get('/', (req, res) => res.sendFile(new URL('./static/index.html', import.meta.url).pathname));
 
+// ── History / baseline tracking ─────────────────────────────────────
+const HISTORY_DIR = process.env.HISTORY_DIR || '/data';
+fs.mkdirSync(HISTORY_DIR, { recursive: true });
+const SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000;
+
+function readJson(name, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, name), 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+function writeJson(name, data) {
+  fs.writeFileSync(path.join(HISTORY_DIR, name), JSON.stringify(data));
+}
+function appendHistory(name, snapshot) {
+  const arr = readJson(`history_${name}.json`, []);
+  arr.push(snapshot);
+  writeJson(`history_${name}.json`, arr);
+}
+function loadHistory(name) {
+  return readJson(`history_${name}.json`, []);
+}
+
+async function captureSnapshot() {
+  if (!DEFAULT_COLDKEY) return;
+  let summary;
+  try {
+    summary = await taoSummary(DEFAULT_COLDKEY);
+  } catch (e) {
+    console.warn('Snapshot capture failed:', e.message);
+    return;
+  }
+
+  const now = Date.now() / 1000;
+  const known = readJson('known_positions.json', {});
+
+  for (const p of summary.positions) {
+    const key = String(p.netuid);
+    const prior = known[key] || {};
+    let baselineUsd = prior.baseline_usd;
+    let baselineTs = prior.baseline_ts;
+
+    // A meaningfully changed alpha amount means a stake/unstake happened,
+    // not organic price movement — reset the baseline so P&L doesn't
+    // misattribute your own capital move as a gain or loss. Small
+    // fractional drift from emissions isn't a reset trigger.
+    const priorAlpha = prior.last_alpha;
+    const alphaChanged = priorAlpha !== undefined && Math.abs(p.alpha - priorAlpha) / Math.max(priorAlpha, 1e-9) > 0.005;
+
+    if (baselineUsd === undefined || alphaChanged) {
+      baselineUsd = p.estimatedUsd;
+      baselineTs = now;
+    }
+    known[key] = { subnet: p.subnet, last_alpha: p.alpha, baseline_usd: baselineUsd, baseline_ts: baselineTs, last_usd: p.estimatedUsd, last_seen: now };
+
+    appendHistory(`pos_${key}`, { ts: now, estimated_usd: p.estimatedUsd, estimated_tao: p.estimatedTao, alpha: p.alpha });
+  }
+  writeJson('known_positions.json', known);
+
+  appendHistory('portfolio', {
+    ts: now,
+    total_value_usd: summary.portfolio.total_value_usd,
+    liquid_balance_tao: summary.liquidBalance,
+    position_count: summary.portfolio.position_count,
+  });
+}
+
+function attachPnl(positions) {
+  const known = readJson('known_positions.json', {});
+  for (const p of positions) {
+    const entry = known[String(p.netuid)];
+    p.baseline_usd = entry ? entry.baseline_usd : null;
+    if (entry && entry.baseline_usd && p.estimatedUsd !== null) {
+      p.pnl_usd = p.estimatedUsd - entry.baseline_usd;
+      p.pnl_pct = (p.pnl_usd / entry.baseline_usd) * 100;
+    } else {
+      p.pnl_usd = null;
+      p.pnl_pct = null;
+    }
+  }
+  return positions;
+}
+
+const RANGE_TO_SECONDS = { '7d': 7 * 86400, '30d': 30 * 86400, '90d': 90 * 86400, all: null };
+
+app.get('/api/history', (req, res) => {
+  const range = req.query.range || '30d';
+  if (!(range in RANGE_TO_SECONDS)) return res.status(400).json({ error: 'range must be one of: 7d, 30d, 90d, all' });
+  let snapshots = loadHistory('portfolio');
+  const windowSeconds = RANGE_TO_SECONDS[range];
+  if (windowSeconds !== null) {
+    const cutoff = Date.now() / 1000 - windowSeconds;
+    snapshots = snapshots.filter(s => s.ts >= cutoff);
+  }
+  res.json({ snapshots, range });
+});
+
+app.get('/api/history/:netuid', (req, res) => {
+  const range = req.query.range || '30d';
+  if (!(range in RANGE_TO_SECONDS)) return res.status(400).json({ error: 'range must be one of: 7d, 30d, 90d, all' });
+  let snapshots = loadHistory(`pos_${req.params.netuid}`);
+  const windowSeconds = RANGE_TO_SECONDS[range];
+  if (windowSeconds !== null) {
+    const cutoff = Date.now() / 1000 - windowSeconds;
+    snapshots = snapshots.filter(s => s.ts >= cutoff);
+  }
+  res.json({ snapshots, range, netuid: req.params.netuid });
+});
+
+setInterval(() => { captureSnapshot().catch(e => console.error('Snapshot loop error:', e)); }, SNAPSHOT_INTERVAL_MS);
+captureSnapshot().catch(e => console.error('Initial snapshot error:', e));
+
 app.get('/api/positions', async (req, res) => {
   const coldkey = (req.query.coldkey || DEFAULT_COLDKEY || '').trim();
   if (!coldkey) return res.status(400).json({ error: 'No coldkey specified and no default coldkey configured' });
   try {
     const result = await taoSummary(coldkey);
+    if (coldkey === DEFAULT_COLDKEY) attachPnl(result.positions);
     res.json(result);
   } catch (e) {
     console.error('taoSummary failed:', e.message);

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TAO Tracker</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0d12'/><text y='24' x='4' font-size='22' fill='%2314f1b2'>&#9670;</text></svg>">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='6'%20fill='%230a0d12'/%3E%3Ctext%20y='24'%20x='4'%20font-size='22'%20fill='%23c026d3'%3E%E2%97%86%3C/text%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0a0d12; --surface: #0f1318; --border: #1d2330; --border2: #2a3142;
@@ -40,9 +40,21 @@
   .stat-value.dim { color: var(--muted); font-size: 12px; }
   .empty-state { color: var(--muted); padding: 40px; text-align: center; }
   .error-banner { background: rgba(244,84,92,0.08); border: 1px solid rgba(244,84,92,0.25); border-radius: 8px; padding: 12px 16px; font-size: 12px; color: var(--red); margin-bottom: 20px; display: none; }
+  .pos-history-toggle { cursor: pointer; color: var(--teal); font-size: 12px; margin-top: 14px; user-select: none; }
+  .pos-history-panel { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .range-btns { display: flex; gap: 6px; margin-bottom: 8px; }
+  .range-btn { font-size: 11px; color: var(--muted); background: transparent; border: 1px solid var(--border2); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-family: var(--mono); }
+  .range-btn.active { background: var(--teal); color: var(--bg); border-color: var(--teal); }
+  .history-chart-wrap { position: relative; }
+  .history-empty { font-size: 12px; color: var(--muted); text-align: center; padding: 30px 0; }
+  .pnl-sub { font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+  .pnl-pos { color: var(--teal); }
+  .pnl-neg { color: var(--red); }
 </style>
 </head>
 <body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
   <div class="header">
     <div>
       <a href="https://v4.lptracker.info" class="hub-link">← Hub</a>
@@ -67,6 +79,14 @@ function fmtUsd(n) {
 function fmtNum(n, decimals) {
   if (n === null || n === undefined) return '—';
   return Number(n).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+function fmtPnl(usd, pct) {
+  if (usd === null || usd === undefined) return null;
+  const cls = usd >= 0 ? 'pnl-pos' : 'pnl-neg';
+  const sign = usd >= 0 ? '+' : '-';
+  const usdStr = sign + '$' + Math.abs(usd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const pctStr = (pct !== null && pct !== undefined) ? ` (${sign}${Math.abs(pct).toFixed(2)}%)` : '';
+  return { cls, text: usdStr + pctStr };
 }
 function shortHotkey(hk) {
   if (!hk) return '—';
@@ -101,6 +121,9 @@ function renderPositions(positions) {
     const validatorLines = p.validators.map(v =>
       `<div class="stat-value dim" style="margin-top:4px;">${shortHotkey(v.hotkey)} — ${fmtNum(v.alpha, 4)} ${p.symbol} (${v.registered ? 'registered' : 'unregistered'})</div>`
     ).join('');
+    const pnl = fmtPnl(p.pnl_usd, p.pnl_pct);
+    const pnlLine = pnl ? `<div class="pnl-sub ${pnl.cls}">${pnl.text}</div>` : '';
+    const posKey = String(p.netuid);
 
     return `
       <div class="position-card ${cardClass}">
@@ -117,6 +140,7 @@ function renderPositions(positions) {
             <div class="stat-label">Estimated TAO Value</div>
             <div class="stat-value">${fmtNum(p.estimatedTao, 4)} TAO</div>
             <div class="stat-value dim" style="margin-top:2px;">${fmtUsd(p.estimatedUsd)}</div>
+            ${pnlLine}
           </div>
           <div>
             <div class="stat-label">Validators</div>
@@ -128,9 +152,122 @@ function renderPositions(positions) {
           </div>
         </div>
         ${validatorLines ? `<div style="margin-top:14px; padding-top:10px; border-top:1px solid var(--border);"><div class="stat-label">Validator Breakdown</div>${validatorLines}</div>` : ''}
+
+        <div class="pos-history-toggle" onclick="togglePositionHistory('${posKey}')">
+          <span id="pos-history-arrow-${posKey}">▸</span> Position History
+        </div>
+        <div class="pos-history-panel" id="pos-history-panel-${posKey}" style="display:none;">
+          <div class="range-btns" id="pos-history-btns-${posKey}">
+            <button class="range-btn" onclick="setPositionHistoryRange('${posKey}', '7d', this)">7D</button>
+            <button class="range-btn active" onclick="setPositionHistoryRange('${posKey}', '30d', this)">30D</button>
+            <button class="range-btn" onclick="setPositionHistoryRange('${posKey}', '90d', this)">90D</button>
+            <button class="range-btn" onclick="setPositionHistoryRange('${posKey}', 'all', this)">All</button>
+          </div>
+          <div class="history-chart-wrap" style="height:160px;"><canvas id="pos-history-chart-${posKey}"></canvas></div>
+        </div>
       </div>
     `;
   }).join('');
+}
+
+const positionPanelOpened = {};
+const positionCurrentRange = {};
+const positionChartInstances = {};
+
+function togglePositionHistory(netuid) {
+  const panel = document.getElementById(`pos-history-panel-${netuid}`);
+  const arrow = document.getElementById(`pos-history-arrow-${netuid}`);
+  const isOpen = panel.style.display !== 'none';
+  if (isOpen) { panel.style.display = 'none'; arrow.textContent = '▸'; return; }
+  panel.style.display = 'block';
+  arrow.textContent = '▾';
+  if (!positionPanelOpened[netuid]) {
+    positionPanelOpened[netuid] = true;
+    positionCurrentRange[netuid] = '30d';
+    loadPositionHistory(netuid, '30d');
+  }
+}
+
+function setPositionHistoryRange(netuid, range, btnEl) {
+  positionCurrentRange[netuid] = range;
+  btnEl.parentElement.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  btnEl.classList.add('active');
+  loadPositionHistory(netuid, range);
+}
+
+async function loadPositionHistory(netuid, range) {
+  const canvas = document.getElementById(`pos-history-chart-${netuid}`);
+  try {
+    const res = await fetch(`/api/history/${netuid}?range=${range}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    renderPositionHistoryChart(netuid, canvas, data.snapshots || []);
+  } catch (e) {
+    const existing = Chart.getChart(canvas);
+    if (existing) existing.destroy();
+    canvas.style.display = 'none';
+    const wrap = canvas.parentElement;
+    let msg = wrap.querySelector('.history-empty');
+    if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty'; wrap.appendChild(msg); }
+    msg.textContent = 'History unavailable: ' + e.message;
+  }
+}
+
+function renderPositionHistoryChart(netuid, canvas, snapshots) {
+  const wrap = canvas.parentElement;
+  const existingMsg = wrap.querySelector('.history-empty');
+  const withValue = snapshots.filter(s => s.estimated_usd !== undefined && s.estimated_usd !== null);
+
+  if (!withValue.length) {
+    const existing = Chart.getChart(canvas);
+    if (existing) existing.destroy();
+    canvas.style.display = 'none';
+    let msg = existingMsg;
+    if (!msg) { msg = document.createElement('div'); msg.className = 'history-empty'; wrap.appendChild(msg); }
+    msg.textContent = 'No history yet for this position in this range.';
+    return;
+  }
+  if (existingMsg) existingMsg.remove();
+  canvas.style.display = 'block';
+
+  const labels = withValue.map(s => new Date(s.ts * 1000));
+  const values = withValue.map(s => s.estimated_usd);
+
+  const existingChart = Chart.getChart(canvas);
+  if (existingChart) existingChart.destroy();
+  positionChartInstances[netuid] = new Chart(canvas, {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Estimated Value (USD)', data: values, borderColor: '#c026d3',
+      backgroundColor: 'rgba(192,38,211,0.08)', fill: true, tension: 0.25, pointRadius: 0 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { type: 'time', time: { tooltipFormat: 'MMM d, HH:mm' }, ticks: { color: '#7a8899', font: { size: 9 } }, grid: { color: '#1d2330' } },
+        y: { ticks: { color: '#7a8899', font: { size: 9 } }, grid: { color: '#1d2330' } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function restoreOpenPositionHistories(positions) {
+  for (const p of positions) {
+    const netuid = String(p.netuid);
+    if (!positionPanelOpened[netuid]) continue;
+    const panel = document.getElementById(`pos-history-panel-${netuid}`);
+    const arrow = document.getElementById(`pos-history-arrow-${netuid}`);
+    if (!panel) continue;
+    panel.style.display = 'block';
+    if (arrow) arrow.textContent = '▾';
+    const range = positionCurrentRange[netuid] || '30d';
+    const btnsContainer = document.getElementById(`pos-history-btns-${netuid}`);
+    if (btnsContainer) {
+      btnsContainer.querySelectorAll('.range-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent.trim().toLowerCase() === range.toLowerCase());
+      });
+    }
+    loadPositionHistory(netuid, range);
+  }
 }
 
 async function loadPositions(bust) {
@@ -143,6 +280,7 @@ async function loadPositions(bust) {
     document.getElementById('error-banner').style.display = 'none';
     renderPortfolio(data);
     renderPositions(data.positions);
+    restoreOpenPositionHistories(data.positions || []);
   } catch (e) {
     const el = document.getElementById('error-banner');
     el.textContent = 'Could not load positions: ' + e.message;
