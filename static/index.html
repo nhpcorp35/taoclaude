@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TAO Tracker</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0d12'/><text y='24' x='4' font-size='22' fill='%2314f1b2'>&#9670;</text></svg>">
+<style>
+  :root {
+    --bg: #0a0d12; --surface: #0f1318; --border: #1d2330; --border2: #2a3142;
+    --text: #e8ecf1; --muted: #7a8899; --teal: #14f1b2; --teal-dim: rgba(20,241,178,0.12);
+    --red: #f4545c; --amber: #f5a623;
+    --mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: var(--mono); margin: 0; padding: 24px; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+  .hub-link { display: inline-block; color: var(--muted); font-size: 12px; text-decoration: none; margin-bottom: 6px; }
+  .hub-link:hover { color: var(--teal); }
+  .title { font-size: 20px; font-weight: 600; }
+  .subtitle { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  input { font-family: var(--mono); background: var(--surface); border: 1px solid var(--border2); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; width: 380px; }
+  .btn { font-family: var(--mono); font-size: 13px; font-weight: 500; padding: 8px 18px; border-radius: 8px; border: 1px solid var(--teal); color: var(--bg); background: var(--teal); cursor: pointer; }
+  .portfolio-bar { display: flex; gap: 40px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; }
+  .portfolio-stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .portfolio-stat-value { font-size: 22px; font-weight: 600; }
+  .portfolio-stat-value.accent { color: var(--teal); }
+  .position-card { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--teal); border-radius: 12px; padding: 20px 24px; margin-bottom: 16px; }
+  .position-card.root { border-left-color: var(--amber); }
+  .pos-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+  .pos-title { font-size: 16px; font-weight: 600; }
+  .pos-title .netuid-tag { font-size: 11px; color: var(--muted); background: var(--border); padding: 2px 8px; border-radius: 4px; margin-left: 8px; }
+  .pos-title .chain-tag { font-size: 10px; color: var(--teal); background: var(--teal-dim); padding: 2px 8px; border-radius: 4px; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .reg-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .reg-badge.yes { background: var(--teal-dim); color: var(--teal); }
+  .reg-badge.no { background: rgba(245,166,35,0.12); color: var(--amber); }
+  .pos-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; }
+  .stat-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .stat-value { font-size: 15px; font-weight: 500; }
+  .stat-value.dim { color: var(--muted); font-size: 12px; }
+  .empty-state { color: var(--muted); padding: 40px; text-align: center; }
+  .error-banner { background: rgba(244,84,92,0.08); border: 1px solid rgba(244,84,92,0.25); border-radius: 8px; padding: 12px 16px; font-size: 12px; color: var(--red); margin-bottom: 20px; display: none; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <a href="https://v4.lptracker.info" class="hub-link">← Hub</a>
+      <div class="title">◈ TAO Tracker</div>
+      <div class="subtitle">Bittensor coldkey + subnet stake · read-only, no signing key</div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <input id="coldkey-input" placeholder="Coldkey 5...">
+      <button class="btn" onclick="loadPositions(true)">Load</button>
+    </div>
+  </div>
+
+  <div class="error-banner" id="error-banner"></div>
+  <div id="portfolio"></div>
+  <div id="positions"></div>
+
+<script>
+function fmtUsd(n) {
+  if (n === null || n === undefined) return '—';
+  return '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtNum(n, decimals) {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+function shortHotkey(hk) {
+  if (!hk) return '—';
+  return hk.slice(0, 8) + '…' + hk.slice(-6);
+}
+
+function renderPortfolio(data) {
+  const el = document.getElementById('portfolio');
+  if (!data || !data.positions) {
+    el.innerHTML = `<div class="empty-state">No subnet stake found for this coldkey.</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="portfolio-bar">
+      <div><div class="portfolio-stat-label">Estimated Staked Value</div><div class="portfolio-stat-value accent">${fmtUsd(data.portfolio.total_value_usd)}</div></div>
+      <div><div class="portfolio-stat-label">Liquid Balance</div><div class="portfolio-stat-value">${fmtNum(data.liquidBalance, 6)} TAO</div><div class="stat-value dim" style="margin-top:2px;">${fmtUsd(data.liquidBalanceUsd)}</div></div>
+      <div><div class="portfolio-stat-label">Subnet Positions</div><div class="portfolio-stat-value">${data.portfolio.position_count}</div></div>
+      <div><div class="portfolio-stat-label">TAO Price</div><div class="portfolio-stat-value">${fmtUsd(data.taoPrice)}</div><div class="stat-value dim" style="margin-top:2px;">Spot, CoinGecko</div></div>
+    </div>
+  `;
+}
+
+function renderPositions(positions) {
+  const el = document.getElementById('positions');
+  if (!positions || positions.length === 0) { el.innerHTML = ''; return; }
+
+  el.innerHTML = positions.map(p => {
+    const isRoot = p.netuid === 0;
+    const cardClass = isRoot ? 'root' : '';
+    const regClass = p.registered ? 'yes' : 'no';
+    const regText = p.registered ? 'Registered' : 'Unregistered';
+    const validatorLines = p.validators.map(v =>
+      `<div class="stat-value dim" style="margin-top:4px;">${shortHotkey(v.hotkey)} — ${fmtNum(v.alpha, 4)} ${p.symbol} (${v.registered ? 'registered' : 'unregistered'})</div>`
+    ).join('');
+
+    return `
+      <div class="position-card ${cardClass}">
+        <div class="pos-header">
+          <div class="pos-title">${p.subnet}<span class="netuid-tag">NETUID ${p.netuid}</span><span class="chain-tag">Bittensor</span></div>
+          <span class="reg-badge ${regClass}">${regText}</span>
+        </div>
+        <div class="pos-grid">
+          <div>
+            <div class="stat-label">Stake</div>
+            <div class="stat-value">${fmtNum(p.alpha, 4)} ${p.symbol}</div>
+          </div>
+          <div>
+            <div class="stat-label">Estimated TAO Value</div>
+            <div class="stat-value">${fmtNum(p.estimatedTao, 4)} TAO</div>
+            <div class="stat-value dim" style="margin-top:2px;">${fmtUsd(p.estimatedUsd)}</div>
+          </div>
+          <div>
+            <div class="stat-label">Validators</div>
+            <div class="stat-value">${p.validatorCount} combined (${p.registeredValidators} registered)</div>
+          </div>
+          <div>
+            <div class="stat-label">Locked</div>
+            <div class="stat-value">${p.locked > 0 ? fmtNum(p.locked, 4) + ' TAO' : 'None'}</div>
+          </div>
+        </div>
+        ${validatorLines ? `<div style="margin-top:14px; padding-top:10px; border-top:1px solid var(--border);"><div class="stat-label">Validator Breakdown</div>${validatorLines}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadPositions(bust) {
+  const coldkeyInput = document.getElementById('coldkey-input').value.trim();
+  const url = `/api/positions${coldkeyInput ? '?coldkey=' + encodeURIComponent(coldkeyInput) : ''}`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Request failed');
+    document.getElementById('error-banner').style.display = 'none';
+    renderPortfolio(data);
+    renderPositions(data.positions);
+  } catch (e) {
+    const el = document.getElementById('error-banner');
+    el.textContent = 'Could not load positions: ' + e.message;
+    el.style.display = 'block';
+  }
+}
+
+loadPositions(false);
+setInterval(() => loadPositions(false), 90000);
+</script>
+</body>
+</html>
