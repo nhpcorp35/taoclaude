@@ -45,8 +45,14 @@ const bytesText = (value) => {
 };
 
 let cachedApi = null;
-async function getApi() {
-  if (cachedApi && cachedApi.isConnected) return cachedApi;
+async function getApi(forceFresh = false) {
+  if (!forceFresh && cachedApi && cachedApi.isConnected) return cachedApi;
+  if (cachedApi) {
+    // Don't leak the old connection — a stale one after a runtime
+    // upgrade is exactly what caused this bug in the first place.
+    try { await cachedApi.disconnect(); } catch { /* already gone */ }
+    cachedApi = null;
+  }
   const provider = new WsProvider(BITTENSOR_ENDPOINT);
   cachedApi = await ApiPromise.create({ provider, noInitWarn: true });
   return cachedApi;
@@ -74,7 +80,23 @@ async function taoSummary(coldkey) {
   const cached = summaryCache.get(key);
   if (cached && Date.now() - cached.at < SUMMARY_CACHE_TTL) return cached.value;
 
-  const api = await getApi();
+  let result;
+  try {
+    result = await taoSummaryInner(key, await getApi());
+  } catch (e) {
+    // A stale connection after a chain runtime upgrade is the known
+    // failure mode here (confirmed directly: every call broke right
+    // after a live spec-version bump, despite the socket staying
+    // "connected") — force a fresh connection and retry once before
+    // giving up for real.
+    console.warn(`taoSummary first attempt failed (${e.message}), retrying with a fresh connection...`);
+    result = await taoSummaryInner(key, await getApi(true));
+  }
+  summaryCache.set(key, { at: Date.now(), value: result });
+  return result;
+}
+
+async function taoSummaryInner(key, api) {
   const [account, stakeInfo, price] = await Promise.all([
     api.query.system.account(key),
     api.call.stakeInfoRuntimeApi.getStakeInfoForColdkey(key),
@@ -159,7 +181,6 @@ async function taoSummary(coldkey) {
     },
     fetched_at: Date.now() / 1000,
   };
-  summaryCache.set(key, { at: Date.now(), value: result });
   return result;
 }
 
