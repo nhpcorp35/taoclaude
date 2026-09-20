@@ -125,13 +125,34 @@ async function taoSummaryInner(key, api) {
   }));
   const subnetById = new Map(subnetData.map(row => [row.netuid, row]));
 
-  const validatorAllocations = rawRows.map(row => {
+  const validatorAllocations = await Promise.all(rawRows.map(async (row) => {
     const subnet = subnetById.get(Number(row.netuid));
     const alpha = taoAmount(row.stake);
     // Netuid 0 is TAO directly. Dynamic subnet positions are alpha — this
     // is a spot-value estimate using the current TAO/alpha pool ratio,
     // not an unstake quote (slippage isn't modeled).
     const estimatedTao = Number(row.netuid) === 0 ? alpha : alpha * ((subnet?.taoReserve || 0) / Math.max(subnet?.alphaReserve || 0, 1e-12));
+
+    // Root Reborn: dividends now flow into a validator-curated basket
+    // rather than compounding directly into root stake. What's actually
+    // owed to this staker sits in getBasketPosition, keyed by BOTH
+    // hotkey and coldkey together — confirmed directly tonight after an
+    // earlier, wrong attempt using a single-key call
+    // (getRootBasketOwed) returned a figure ~1000x too small. Only
+    // meaningful for root (netuid 0); dynamic subnets have no basket.
+    let basketClaimableTao = null;
+    if (Number(row.netuid) === 0) {
+      try {
+        const basketPos = await api.call.betaBasketRuntimeApi.getBasketPosition(row.hotkey, key);
+        const json = basketPos.toJSON();
+        if (json && json.valueTao != null) basketClaimableTao = taoAmount(json.valueTao);
+      } catch {
+        // No basket position for this validator (trading not curated
+        // there, or the call isn't supported) — leave null, not zero,
+        // so the frontend can distinguish "none" from "unavailable".
+      }
+    }
+
     return {
       netuid: Number(row.netuid),
       subnet: subnet?.name || `Subnet ${row.netuid}`,
@@ -141,8 +162,9 @@ async function taoSummaryInner(key, api) {
       estimatedTao,
       registered: Boolean(row.isRegistered),
       locked: taoAmount(row.locked),
+      basketClaimableTao,
     };
-  });
+  }));
 
   // A coldkey may allocate to several validators within one subnet — roll
   // those up into one position row while retaining the count.
@@ -151,6 +173,7 @@ async function taoSummaryInner(key, api) {
     const current = grouped.get(row.netuid) || {
       netuid: row.netuid, subnet: row.subnet, symbol: row.symbol,
       alpha: 0, estimatedTao: 0, locked: 0, validatorCount: 0, registeredValidators: 0, validators: [],
+      basketClaimableTao: null,
     };
     current.alpha += row.alpha;
     current.estimatedTao += row.estimatedTao;
@@ -158,11 +181,19 @@ async function taoSummaryInner(key, api) {
     current.validatorCount += 1;
     current.registeredValidators += row.registered ? 1 : 0;
     current.validators.push({ hotkey: row.hotkey, alpha: row.alpha, estimatedTao: row.estimatedTao, registered: row.registered });
+    if (row.basketClaimableTao != null) {
+      current.basketClaimableTao = (current.basketClaimableTao || 0) + row.basketClaimableTao;
+    }
     grouped.set(row.netuid, current);
   }
 
   const positions = [...grouped.values()]
-    .map(row => ({ ...row, estimatedUsd: price == null ? null : row.estimatedTao * price, registered: row.registeredValidators > 0 }))
+    .map(row => ({
+      ...row,
+      estimatedUsd: price == null ? null : row.estimatedTao * price,
+      registered: row.registeredValidators > 0,
+      basketClaimableUsd: (price == null || row.basketClaimableTao == null) ? null : row.basketClaimableTao * price,
+    }))
     .sort((a, b) => b.estimatedTao - a.estimatedTao);
 
   const totalStakedTao = positions.reduce((sum, p) => sum + p.estimatedTao, 0);

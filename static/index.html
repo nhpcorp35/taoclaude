@@ -131,6 +131,20 @@ function renderPositions(positions) {
           return `<div class="stat-value ${cls}">${sign}${Math.abs(p.daily_stake_growth).toFixed(6)} ${p.symbol}/day${pctStr}</div>`;
         })()
       : `<div class="stat-value dim">Collecting (needs 12h+ of history)</div>`;
+    // Root Reborn: dividends flow into a validator-curated basket rather
+    // than compounding directly into root stake, so this can be
+    // genuinely nonzero even while Daily Stake Growth above reads zero
+    // — confirmed directly tonight this isn't a rounding artifact, it's
+    // real value sitting uncredited to root stake until claimed.
+    // Root-only; dynamic subnets have no basket concept.
+    const basketLine = p.netuid === 0
+      ? `<div>
+          <div class="stat-label">Root Basket Claimable</div>
+          ${p.basketClaimableTao !== null && p.basketClaimableTao !== undefined
+            ? `<div class="stat-value">${fmtNum(p.basketClaimableTao, 5)} TAO</div><div class="stat-value dim" style="margin-top:2px;">${fmtUsd(p.basketClaimableUsd)}</div>`
+            : `<div class="stat-value dim">Unavailable</div>`}
+        </div>`
+      : '';
     const posKey = String(p.netuid);
 
     return `
@@ -154,6 +168,7 @@ function renderPositions(positions) {
             <div class="stat-label">Daily Stake Growth</div>
             ${dailyGrowthLine}
           </div>
+          ${basketLine}
           <div>
             <div class="stat-label">Validators</div>
             <div class="stat-value">${p.validatorCount} combined (${p.registeredValidators} registered)</div>
