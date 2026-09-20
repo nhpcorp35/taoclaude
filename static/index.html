@@ -123,6 +123,14 @@ function renderPositions(positions) {
     ).join('');
     const pnl = fmtPnl(p.pnl_usd, p.pnl_pct);
     const pnlLine = pnl ? `<div class="pnl-sub ${pnl.cls}">${pnl.text}</div>` : '';
+    const dailyGrowthLine = p.daily_stake_growth !== null && p.daily_stake_growth !== undefined
+      ? (() => {
+          const sign = p.daily_stake_growth >= 0 ? '+' : '-';
+          const cls = p.daily_stake_growth >= 0 ? 'pnl-pos' : 'pnl-neg';
+          const pctStr = p.daily_stake_growth_pct !== null ? ` (${sign}${Math.abs(p.daily_stake_growth_pct).toFixed(4)}%/day)` : '';
+          return `<div class="stat-value ${cls}">${sign}${Math.abs(p.daily_stake_growth).toFixed(6)} ${p.symbol}/day${pctStr}</div>`;
+        })()
+      : `<div class="stat-value dim">Collecting (needs 12h+ of history)</div>`;
     const posKey = String(p.netuid);
 
     return `
@@ -141,6 +149,10 @@ function renderPositions(positions) {
             <div class="stat-value">${fmtNum(p.estimatedTao, 4)} TAO</div>
             <div class="stat-value dim" style="margin-top:2px;">${fmtUsd(p.estimatedUsd)}</div>
             ${pnlLine}
+          </div>
+          <div>
+            <div class="stat-label">Daily Stake Growth</div>
+            ${dailyGrowthLine}
           </div>
           <div>
             <div class="stat-label">Validators</div>

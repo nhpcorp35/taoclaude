@@ -266,8 +266,44 @@ function attachPnl(positions) {
       p.pnl_usd = null;
       p.pnl_pct = null;
     }
+    attachDailyStakeGrowth(p);
   }
   return positions;
+}
+
+function attachDailyStakeGrowth(p) {
+  // Genuine stake growth (alpha amount increasing from staking
+  // rewards/dividends), separate from USD value change — USD value
+  // conflates this with TAO price movement, which this deliberately
+  // avoids. Uses the raw alpha already stored in every hourly
+  // snapshot (appendHistory in captureSnapshot), no new tracking
+  // needed. For root network (netuid 0) alpha is TAO 1:1, so this is
+  // literally TAO/day; for dynamic subnets it's alpha/day in that
+  // subnet's own token.
+  const history = loadHistory(`pos_${p.netuid}`);
+  if (history.length < 2) {
+    p.daily_stake_growth = null;
+    p.daily_stake_growth_pct = null;
+    return;
+  }
+  const now = Date.now() / 1000;
+  const sevenDaysAgo = now - 7 * 86400;
+  // Oldest snapshot within the last 7 days, or the very first one we
+  // have if less than 7 days of history exist yet.
+  let reference = history[0];
+  for (const snap of history) {
+    if (snap.ts >= sevenDaysAgo) { reference = snap; break; }
+  }
+  const daysElapsed = (now - reference.ts) / 86400;
+  if (daysElapsed < 0.5) {
+    // Not enough elapsed time yet for a meaningful daily rate.
+    p.daily_stake_growth = null;
+    p.daily_stake_growth_pct = null;
+    return;
+  }
+  const alphaGrowth = p.alpha - reference.alpha;
+  p.daily_stake_growth = alphaGrowth / daysElapsed;
+  p.daily_stake_growth_pct = reference.alpha > 0 ? (alphaGrowth / reference.alpha / daysElapsed) * 100 : null;
 }
 
 const RANGE_TO_SECONDS = { '7d': 7 * 86400, '30d': 30 * 86400, '90d': 90 * 86400, all: null };
