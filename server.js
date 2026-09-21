@@ -311,6 +311,21 @@ function attachDailyStakeGrowth(p) {
   // needed. For root network (netuid 0) alpha is TAO 1:1, so this is
   // literally TAO/day; for dynamic subnets it's alpha/day in that
   // subnet's own token.
+  //
+  // Real bug found and fixed here: a naive (now - 7-days-ago) delta
+  // gets contaminated by the user's own voluntary stake/unstake
+  // actions — a withdrawal shows up indistinguishable from organic
+  // decline. Confirmed directly: a real ~0.09 TAO withdrawal smeared
+  // across a 7-day window produced a fake -0.015 T/day "decline" even
+  // though actual dividend accrual was positive the whole time.
+  //
+  // Fixed by walking consecutive snapshot pairs and classifying each
+  // interval's delta as organic (small, consistent with dividends) or
+  // a manual action (large, a discrete stake/unstake). Only organic
+  // intervals count toward the rate — this mirrors the same
+  // detect-and-exclude-voluntary-changes principle already used for
+  // vfat/snuggle's baseline resets, just applied to a rate instead of
+  // a baseline.
   const history = loadHistory(`pos_${p.netuid}`);
   if (history.length < 2) {
     p.daily_stake_growth = null;
@@ -319,22 +334,35 @@ function attachDailyStakeGrowth(p) {
   }
   const now = Date.now() / 1000;
   const sevenDaysAgo = now - 7 * 86400;
-  // Oldest snapshot within the last 7 days, or the very first one we
-  // have if less than 7 days of history exist yet.
-  let reference = history[0];
-  for (const snap of history) {
-    if (snap.ts >= sevenDaysAgo) { reference = snap; break; }
+  const windowed = history.filter(s => s.ts >= sevenDaysAgo);
+  const snapshots = windowed.length >= 2 ? windowed : history.slice(-Math.min(history.length, 48));
+
+  // A single interval is "organic" if the rate it implies, annualized,
+  // is under a generous cap — real staking dividends don't remotely
+  // approach this; a manual stake/unstake easily does in one snapshot.
+  const MAX_ORGANIC_ANNUALIZED_RATE = 0.5; // 50%/year
+
+  let organicGrowth = 0;
+  let organicDays = 0;
+  for (let i = 1; i < snapshots.length; i++) {
+    const prev = snapshots[i - 1];
+    const cur = snapshots[i];
+    const intervalDays = (cur.ts - prev.ts) / 86400;
+    if (intervalDays <= 0 || !(prev.alpha > 0)) continue;
+    const delta = cur.alpha - prev.alpha;
+    const impliedAnnualRate = Math.abs(delta / prev.alpha) * (365 / intervalDays);
+    if (impliedAnnualRate > MAX_ORGANIC_ANNUALIZED_RATE) continue; // manual action — excluded
+    organicGrowth += delta;
+    organicDays += intervalDays;
   }
-  const daysElapsed = (now - reference.ts) / 86400;
-  if (daysElapsed < 0.5) {
-    // Not enough elapsed time yet for a meaningful daily rate.
+
+  if (organicDays < 0.5) {
     p.daily_stake_growth = null;
     p.daily_stake_growth_pct = null;
     return;
   }
-  const alphaGrowth = p.alpha - reference.alpha;
-  p.daily_stake_growth = alphaGrowth / daysElapsed;
-  p.daily_stake_growth_pct = reference.alpha > 0 ? (alphaGrowth / reference.alpha / daysElapsed) * 100 : null;
+  p.daily_stake_growth = organicGrowth / organicDays;
+  p.daily_stake_growth_pct = p.alpha > 0 ? (p.daily_stake_growth / p.alpha) * 100 : null;
 }
 
 const RANGE_TO_SECONDS = { '7d': 7 * 86400, '30d': 30 * 86400, '90d': 90 * 86400, all: null };
