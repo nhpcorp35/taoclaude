@@ -273,7 +273,7 @@ async function captureSnapshot() {
     }
     known[key] = { subnet: p.subnet, last_alpha: p.alpha, baseline_usd: baselineUsd, baseline_ts: baselineTs, last_usd: p.estimatedUsd, last_seen: now };
 
-    appendHistory(`pos_${key}`, { ts: now, estimated_usd: p.estimatedUsd, estimated_tao: p.estimatedTao, alpha: p.alpha });
+    appendHistory(`pos_${key}`, { ts: now, estimated_usd: p.estimatedUsd, estimated_tao: p.estimatedTao, alpha: p.alpha, basket_claimable_tao: p.basketClaimableTao });
   }
   writeJson('known_positions.json', known);
 
@@ -303,29 +303,23 @@ function attachPnl(positions) {
 }
 
 function attachDailyStakeGrowth(p) {
-  // Genuine stake growth (alpha amount increasing from staking
-  // rewards/dividends), separate from USD value change — USD value
-  // conflates this with TAO price movement, which this deliberately
-  // avoids. Uses the raw alpha already stored in every hourly
-  // snapshot (appendHistory in captureSnapshot), no new tracking
-  // needed. For root network (netuid 0) alpha is TAO 1:1, so this is
-  // literally TAO/day; for dynamic subnets it's alpha/day in that
-  // subnet's own token.
+  // Genuine stake growth, separate from USD value change (which
+  // conflates this with TAO price movement). Uses history already
+  // stored by captureSnapshot, no new tracking infrastructure.
   //
-  // Real bug found and fixed here: a naive (now - 7-days-ago) delta
-  // gets contaminated by the user's own voluntary stake/unstake
-  // actions — a withdrawal shows up indistinguishable from organic
-  // decline. Confirmed directly: a real ~0.09 TAO withdrawal smeared
-  // across a 7-day window produced a fake -0.015 T/day "decline" even
-  // though actual dividend accrual was positive the whole time.
-  //
-  // Fixed by walking consecutive snapshot pairs and classifying each
-  // interval's delta as organic (small, consistent with dividends) or
-  // a manual action (large, a discrete stake/unstake). Only organic
-  // intervals count toward the rate — this mirrors the same
-  // detect-and-exclude-voluntary-changes principle already used for
-  // vfat/snuggle's baseline resets, just applied to a rate instead of
-  // a baseline.
+  // Root (netuid 0) is measured differently from dynamic subnets,
+  // confirmed necessary tonight: under Root Reborn, dividends land in
+  // the validator's basket as claimable TAO rather than compounding
+  // into raw stake — raw root alpha is now structurally near-static,
+  // so measuring its delta (the old approach here) reads zero even
+  // while real yield is accruing. Cross-checked against v3.lptracker's
+  // own independent implementation, which does the same thing for the
+  // same reason (their code comment: "Root rewards accrue in live
+  // basket spot NAV or as claimable TAO without changing the raw Root
+  // stake") — this isn't a guess, it's the verified correct approach.
+  // Dynamic subnets have no basket concept, so raw alpha delta is
+  // still the right (and only) measure there.
+  const isRoot = p.netuid === 0;
   const history = loadHistory(`pos_${p.netuid}`);
   if (history.length < 2) {
     p.daily_stake_growth = null;
@@ -337,11 +331,35 @@ function attachDailyStakeGrowth(p) {
   const windowed = history.filter(s => s.ts >= sevenDaysAgo);
   const snapshots = windowed.length >= 2 ? windowed : history.slice(-Math.min(history.length, 48));
 
+  if (isRoot) {
+    const currentValue = p.basketClaimableTao;
+    // Basket claimable only ever grows from accrual or shrinks from an
+    // actual claim — both are genuine yield-related events, not a
+    // capital move to exclude, so no jump-filtering needed here (unlike
+    // raw stake, which needs to exclude voluntary stake/unstake).
+    const usable = snapshots.filter(s => s.basket_claimable_tao != null);
+    if (usable.length < 2 || currentValue == null) {
+      p.daily_stake_growth = null;
+      p.daily_stake_growth_pct = null;
+      return;
+    }
+    const reference = usable[0];
+    const daysElapsed = (now - reference.ts) / 86400;
+    if (daysElapsed < 0.1) {
+      p.daily_stake_growth = null;
+      p.daily_stake_growth_pct = null;
+      return;
+    }
+    const growth = currentValue - reference.basket_claimable_tao;
+    p.daily_stake_growth = growth / daysElapsed;
+    p.daily_stake_growth_pct = p.alpha > 0 ? (p.daily_stake_growth / p.alpha) * 100 : null;
+    return;
+  }
+
   // A single interval is "organic" if the rate it implies, annualized,
   // is under a generous cap — real staking dividends don't remotely
   // approach this; a manual stake/unstake easily does in one snapshot.
   const MAX_ORGANIC_ANNUALIZED_RATE = 0.5; // 50%/year
-
   let organicGrowth = 0;
   let organicDays = 0;
   for (let i = 1; i < snapshots.length; i++) {
