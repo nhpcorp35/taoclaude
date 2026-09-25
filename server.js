@@ -16,6 +16,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { ApiPromise, WsProvider } from '@polkadot/api';
+import { createAlphaChaser } from './alphachaser.js';
 
 const app = express();
 app.use(cors());
@@ -423,6 +424,15 @@ app.get('/api/positions', async (req, res) => {
     console.error('taoSummary failed:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── AlphaChaser bot wallet (chain data only) ────────────────────────
+const alphaChaser = createAlphaChaser({ dataDir: HISTORY_DIR, taoSummary });
+alphaChaser.start();
+app.get('/alphachaser', (req, res) => res.sendFile(new URL('./static/alphachaser.html', import.meta.url).pathname));
+app.get('/api/alphachaser', async (req, res) => {
+  try { res.json(await alphaChaser.summary()); }
+  catch (e) { console.error('alphachaser summary failed:', e.message); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
