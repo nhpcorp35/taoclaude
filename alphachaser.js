@@ -240,7 +240,8 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
     const priceByNetuid = {};
     for (const p of s.positions) priceByNetuid[p.netuid] = p.alpha > 0 ? p.estimatedTao / p.alpha : null;
     if (!state) {
-      return { ok: true, syncing: true, error: lastError, coldkey: COLDKEY, tao_price: s.taoPrice, positions: s.positions, totals: { value_tao: value, staked_tao: staked, free_tao: s.liquidBalance } };
+      return { ok: true, syncing: true, error: lastError, coldkey: COLDKEY, tao_price: s.taoPrice, positions: s.positions, totals: { value_tao: value, staked_tao: staked, free_tao: s.liquidBalance },
+        portfolio: { total_value_usd: s.taoPrice == null ? null : value * s.taoPrice, total_pnl_usd: null } };
     }
     const byNetuid = fifo(state.trades, priceByNetuid);
     for (const p of s.positions) p.pnl = byNetuid[p.netuid] || null;
@@ -269,6 +270,8 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
         pnl_pct: state.start_value_tao + netDeposits > 0 ? (pnl / (state.start_value_tao + Math.max(netDeposits, 0))) * 100 : null,
         realized_tao: realized, unrealized_tao: unrealized,
       },
+      // Hub-compatible block (v4.lptracker.info reads portfolio.*)
+      portfolio: { total_value_usd: usd(value), total_pnl_usd: usd(pnl) },
       trade_count: state.trades.length,
       trades: [...state.trades].sort((a, b) => b.block - a.block || b.ext - a.ext).slice(0, 300),
       transfers: [...state.transfers].sort((a, b) => b.block - a.block),
