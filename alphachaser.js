@@ -20,7 +20,9 @@ const COLDKEY = process.env.AC_COLDKEY || '5H5aHNEKpT6wtyq1fTZB8aj3NT8JytE8FjxYm
 const ARCHIVE = process.env.BITTENSOR_ARCHIVE_WS_URL || 'wss://archive.chain.opentensor.ai:443';
 const BACKFILL_DAYS = Number(process.env.AC_BACKFILL_DAYS || 30);
 const SCAN_INTERVAL_MS = Number(process.env.AC_SCAN_INTERVAL_MS || 10 * 60 * 1000);
-const STEP = 50;
+const STEP = Number(process.env.AC_STEP || 300);
+const PACE_MS = Number(process.env.AC_PACE_MS || 250);
+const STATE_VERSION = 2;
 const BLOCKS_PER_DAY = 7200;
 const rao = (v) => Number(String(v).replace(/,/g, '')) / 1e9;
 
@@ -117,6 +119,28 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
     }
   }
 
+  const isRateLimit = (e) => /rate limit|-32004|budget/i.test(String(e && e.message));
+  const pause = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // Free TAO only changes on stake/unstake/transfer (emissions go to stake),
+  // so it is a cheap, exact trade detector: one storage read per sample.
+  async function freeAt(api, n) {
+    await pause(PACE_MS);
+    const hash = await api.rpc.chain.getBlockHash(n);
+    const acct = await api.query.system.account.at(hash, COLDKEY);
+    return Number(acct.data.free.toString());
+  }
+
+  // Find every block in (a, b] where free balance changed, by bisection.
+  async function findChanges(api, a, b, fa, fb, out) {
+    if (fa === fb) return;
+    if (b - a === 1) { out.push(b); return; }
+    const m = Math.floor((a + b) / 2);
+    const fm = await freeAt(api, m);
+    await findChanges(api, a, m, fa, fm, out);
+    await findChanges(api, m, b, fm, fb, out);
+  }
+
   async function scan() {
     if (scanning) return;
     scanning = true;
@@ -125,48 +149,43 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
       const head = (await api.rpc.chain.getHeader()).number.toNumber();
       lastHead = head;
       let state = load();
-      if (!state || state.coldkey !== COLDKEY) {
+      if (!state || state.coldkey !== COLDKEY || state.version !== STATE_VERSION) {
         const start = head - BACKFILL_DAYS * BLOCKS_PER_DAY;
         const w = await walletAt(api, start);
         state = {
-          coldkey: COLDKEY, start_block: start,
+          version: STATE_VERSION, coldkey: COLDKEY, start_block: start,
           start_ts: Number((await w.at.query.timestamp.now()).toString()) / 1000,
           start_value_tao: await valueTao(w.at, w),
-          scanned_to: start, trades: [], transfers: [], other: [], snapshots: [],
+          scanned_to: start, trades: [], transfers: [], other: [], snapshots: (state && state.snapshots) || [],
         };
         save(state);
         console.log(`alphachaser: backfill from block ${start}, start value ${state.start_value_tao.toFixed(4)} τ`);
       }
-      let prev = await walletAt(api, state.scanned_to);
       let n = state.scanned_to;
+      let fPrev = await freeAt(api, n);
       let sinceSave = 0;
       while (n < head) {
         const next = Math.min(n + STEP, head);
-        let cur;
-        try {
-          cur = await walletAt(api, next);
-          if (traded(prev, cur)) {
-            for (let b = n + 1; b <= next; b++) await scanBlock(api, b, state);
-          }
-        } catch (e) {
-          if (!api.isConnected) throw e; // connection problem: abort, resume next cycle
-          // Don't let one undecodable interval (old runtime, node hiccup) stall
-          // the scan forever — record the gap and move on.
-          console.warn(`alphachaser: interval ${n}..${next} failed (${e.message}), recording gap`);
-          state.gaps = state.gaps || [];
-          state.gaps.push([n, next, e.message]);
-          cur = await walletAt(api, next).catch(() => prev);
+        const fNext = await freeAt(api, next);
+        if (fNext !== fPrev) {
+          const blocks = [];
+          await findChanges(api, n, next, fPrev, fNext, blocks);
+          for (const b of blocks) { await pause(PACE_MS); await scanBlock(api, b, state); }
         }
+        // Only advance after the whole interval succeeded — a rate limit
+        // mid-interval throws out of here and the next cycle redoes it.
         state.scanned_to = next;
-        prev = cur; n = next;
-        if (++sinceSave >= 40) { save(state); sinceSave = 0; }
+        fPrev = fNext; n = next;
+        if (++sinceSave >= 20) { save(state); sinceSave = 0; }
       }
       save(state);
       lastError = null;
     } catch (e) {
-      lastError = e.message;
-      console.warn('alphachaser scan failed:', e.message);
-      try { await getArchive(true); } catch { /* retry next cycle */ }
+      lastError = isRateLimit(e) ? 'archive node rate limit — resuming next cycle' : e.message;
+      console.warn('alphachaser scan paused:', e.message);
+      const s = load();
+      if (s) console.warn(`alphachaser: will resume from block ${s.scanned_to}`);
+      if (!isRateLimit(e)) { try { await getArchive(true); } catch { /* retry next cycle */ } }
     } finally {
       scanning = false;
     }
