@@ -245,6 +245,9 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
     }
     const byNetuid = fifo(state.trades, priceByNetuid);
     for (const p of s.positions) p.pnl = byNetuid[p.netuid] || null;
+    // P&L is only trustworthy once the scan has reached the chain head
+    // (unscanned blocks could hold deposits/withdrawals)
+    const caughtUp = lastHead > 0 && lastHead - state.scanned_to <= 600;
     const netDeposits = state.transfers.reduce((a, t) => a + (t.dir === 'IN' ? t.amount : -t.amount), 0);
     const pnl = value - state.start_value_tao - netDeposits;
     const px = s.taoPrice;
@@ -253,7 +256,7 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
     const unrealized = Object.values(byNetuid).reduce((a, v) => a + v.unrealized_tao, 0);
     return {
       ok: true,
-      syncing: scanning && lastHead - state.scanned_to > 300,
+      syncing: !caughtUp,
       gaps: (state.gaps || []).length,
       error: lastError,
       coldkey: COLDKEY,
@@ -273,12 +276,12 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
       // Hub-compatible block (v4.lptracker.info reads portfolio.*)
       portfolio: {
         total_value_usd: usd(value),
-        total_pnl_usd: usd(pnl),
+        total_pnl_usd: caughtUp ? usd(pnl) : null,
         // Annualized return on capital since scan start (simple, like the LP trackers' APR)
         apr_pct: (() => {
           const capital = state.start_value_tao + Math.max(netDeposits, 0);
           const days = (Date.now() / 1000 - state.start_ts) / 86400;
-          return capital > 0 && days >= 1 ? (pnl / capital) / days * 365 * 100 : null;
+          return caughtUp && capital > 0 && days >= 1 ? (pnl / capital) / days * 365 * 100 : null;
         })(),
       },
       trade_count: state.trades.length,
