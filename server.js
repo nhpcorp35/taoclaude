@@ -299,6 +299,8 @@ function attachPnl(positions) {
       p.pnl_pct = null;
     }
     attachDailyStakeGrowth(p);
+    // Staking APR = daily alpha growth from emissions, annualized (simple)
+    p.apr_pct = p.daily_stake_growth_pct == null ? null : p.daily_stake_growth_pct * 365;
   }
   return positions;
 }

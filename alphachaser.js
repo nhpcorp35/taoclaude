@@ -271,7 +271,16 @@ export function createAlphaChaser({ dataDir, taoSummary }) {
         realized_tao: realized, unrealized_tao: unrealized,
       },
       // Hub-compatible block (v4.lptracker.info reads portfolio.*)
-      portfolio: { total_value_usd: usd(value) },
+      portfolio: {
+        total_value_usd: usd(value),
+        total_pnl_usd: usd(pnl),
+        // Annualized return on capital since scan start (simple, like the LP trackers' APR)
+        apr_pct: (() => {
+          const capital = state.start_value_tao + Math.max(netDeposits, 0);
+          const days = (Date.now() / 1000 - state.start_ts) / 86400;
+          return capital > 0 && days >= 1 ? (pnl / capital) / days * 365 * 100 : null;
+        })(),
+      },
       trade_count: state.trades.length,
       trades: [...state.trades].sort((a, b) => b.block - a.block || b.ext - a.ext).slice(0, 300),
       transfers: [...state.transfers].sort((a, b) => b.block - a.block),
